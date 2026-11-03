@@ -50,6 +50,24 @@ LOOP_TYPES: Dict[str, List[Dict[str, Any]]] = {
         _DETAILED_GENERATION,
         {"type": "code_pseudocode"},
     ],
+    # Ablation of "pseudocode": the first version's ban on "Python built-in
+    # function names" led the model to rename the function under test (naming
+    # drift). This variant instead requires the original function and parameter
+    # names, isolating loss of meaning from loss of the interface.
+    "pseudocode_named": [
+        _DETAILED_GENERATION,
+        {
+            "type": "code_pseudocode",
+            "prompt_template": (
+                "Write language-agnostic pseudocode for the following code:\n\n"
+                "```\n{code}\n```\n\n"
+                "Use structured pseudocode keywords (e.g. FUNCTION, IF, ELSE, FOR, WHILE, RETURN) "
+                "and plain-English operations instead of Python syntax. Keep the function name "
+                "and parameter names exactly as they appear in the code.\n\n"
+                "Return only the pseudocode, without explanations or comments."
+            ),
+        },
+    ],
 }
 
 

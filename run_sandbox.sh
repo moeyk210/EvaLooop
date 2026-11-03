@@ -2,12 +2,22 @@
 # Run an evaloop command inside the locked-down sandbox container.
 #   ./run_sandbox.sh --help
 #   ./run_sandbox.sh <evaloop args...>
-# Requires GEMINI_API_KEY in the environment (or in a .env file, gitignored).
+#   ./run_sandbox.sh --python scripts/<script>.py [args...]   (offline, no network)
+# Requires GEMINI_API_KEY in the environment (or in a .env file, gitignored)
+# for evaloop runs.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
-: "${GEMINI_API_KEY:?Set GEMINI_API_KEY (export it or put it in .env)}"
+
+# --python: run a repo script (e.g. failure diagnostics) with no network at all.
+MODE_FLAGS=(-e GEMINI_API_KEY)
+if [[ "${1:-}" == "--python" ]]; then
+  shift
+  MODE_FLAGS=(--network none --entrypoint python -w /work)
+else
+  : "${GEMINI_API_KEY:?Set GEMINI_API_KEY (export it or put it in .env)}"
+fi
 
 mkdir -p results cache logs
 
@@ -29,8 +39,9 @@ exec docker run --rm "${TTY_FLAGS[@]}" \
   --tmpfs /tmp:rw,size=512m \
   --memory 4g --cpus 4 --pids-limit 512 \
   -v "$PWD/evaloop:/opt/evaloop/evaloop:ro" \
+  -v "$PWD/scripts:/work/scripts:ro" \
   -v "$PWD/results:/work/results" \
   -v "$PWD/cache:/work/cache" \
   -v "$PWD/logs:/work/logs" \
-  -e GEMINI_API_KEY \
+  "${MODE_FLAGS[@]}" \
   evaloop-sandbox "$@"

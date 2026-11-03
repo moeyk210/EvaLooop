@@ -135,7 +135,9 @@ class EvaLoopCLI:
             loop: Loop type run in each cycle:
                   "summarization" (default; one-sentence summaries),
                   "summarization_detailed" (detailed summaries, as in the
-                  reference data package), or "pseudocode" (code <-> pseudocode).
+                  reference data package), "pseudocode" (code <-> pseudocode), or
+                  "pseudocode_named" (pseudocode that must keep the function and
+                  parameter names).
             num_tasks: Evaluate a reproducible random subset of this many tasks
                        (default: all tasks).
             subset_seed: Random seed used to pick the num_tasks subset.

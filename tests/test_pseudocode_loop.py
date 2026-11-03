@@ -87,6 +87,16 @@ class TestLoopSelection:
         assert pseudo[0] == detailed[0]
         assert pseudo[1]["type"] == "code_pseudocode"
 
+    def test_named_variant_only_changes_pseudocode_prompt(self, tmp_path):
+        named = make_config(tmp_path, loop="pseudocode_named").get_task_configs()
+        pseudo = make_config(tmp_path, loop="pseudocode").get_task_configs()
+        assert named[0] == pseudo[0]
+        assert named[1]["type"] == "code_pseudocode"
+        prompt = TaskFactory().create_task(named[1]).create_prompt("def f(x): return x")
+        assert "Keep the function name and parameter names exactly" in prompt
+        assert "built-in" not in prompt
+        assert "def f(x): return x" in prompt
+
     def test_task_configs_are_copies(self, tmp_path):
         make_config(tmp_path, loop="pseudocode").get_task_configs()[0]["language"] = "rust"
         assert LOOP_TYPES["pseudocode"][0]["language"] == "python"
