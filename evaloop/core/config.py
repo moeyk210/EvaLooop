@@ -1,9 +1,56 @@
 """Configuration management for EvaLoop framework."""
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# Generation prompt used by the reference data package (prompts/task_prompts.md).
+_DETAILED_GENERATION = {
+    "type": "code_generation",
+    "language": "python",
+    "prompt_template": (
+        "Generate Python code for the following task:\n\n{description}\n\n"
+        "Return only the code, without explanations or comments."
+    ),
+}
+
+# Each loop type is the ordered list of task configs run in one cycle.
+LOOP_TYPES: Dict[str, List[Dict[str, Any]]] = {
+    # Upstream default: one-sentence "write a python function to ..." summaries.
+    "summarization": [
+        {
+            "type": "code_generation",
+            "language": "python",
+            "prompt_template": "Generate Python code for the following task: \n{description}\nReturn only the code, without explanations or comments.",
+        },
+        {
+            "type": "code_summarization",
+            "prompt_template": "Use one sentence to summarize the following code and start with 'write a python function to':\n\n```\n{code}\n```\n\n```\nwrite a python function to\n```",
+        },
+    ],
+    # Detailed summaries, exactly as in the reference data package.
+    "summarization_detailed": [
+        _DETAILED_GENERATION,
+        {
+            "type": "code_summarization",
+            "prompt_template": (
+                "Summarize what the following code does in a detailed description:\n\n"
+                "```\n{code}\n```\n\n"
+                "Return only the summary, without explanations or comments."
+            ),
+        },
+    ],
+    # Code <-> pseudocode; same generation prompt as summarization_detailed so
+    # the intermediate representation is the only difference.
+    "pseudocode": [
+        _DETAILED_GENERATION,
+        {"type": "code_pseudocode"},
+    ],
+}
 
 
 @dataclass
@@ -50,6 +97,11 @@ class EvaluationConfig:
     
     # API configuration
     openai_api_key: Optional[str] = None
+
+    # Loop type (see LOOP_TYPES) and optional reproducible task subset
+    loop: str = "summarization"
+    num_tasks: Optional[int] = None
+    subset_seed: int = 0
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -73,6 +125,10 @@ class EvaluationConfig:
         
         if self.max_model_len <= 0:
             raise ValueError("max_model_len must be positive")
+        if self.loop not in LOOP_TYPES:
+            raise ValueError(f"Unknown loop '{self.loop}'. Available loops: {', '.join(LOOP_TYPES)}")
+        if self.num_tasks is not None and self.num_tasks <= 0:
+            raise ValueError("num_tasks must be positive")
         
         # Create output directory
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
@@ -92,7 +148,7 @@ class EvaluationConfig:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = self._sanitize_model_name(self.model)
         
-        return f"evaloop_{model_name}_{self.dataset}_{timestamp}"
+        return f"evaloop_{model_name}_{self.dataset}_{self.loop}_{timestamp}"
     
     def _sanitize_model_name(self, model_name: str) -> str:
         """Sanitize model name for use in file names."""
@@ -120,6 +176,10 @@ class EvaluationConfig:
             "gpu_memory_utilization": self.gpu_memory_utilization,
             "max_model_len": self.max_model_len,
             "trust_remote_code": self.trust_remote_code,
+            "max_new_tokens": self.max_new_tokens,
+            "loop": self.loop,
+            "num_tasks": self.num_tasks,
+            "subset_seed": self.subset_seed,
         }
     
     def get_model_config(self) -> Dict[str, Any]:
@@ -128,6 +188,10 @@ class EvaluationConfig:
     
     def _create_model_config(self, model: str) -> Dict[str, Any]:
         """Create configuration for a specific model."""
+        # Gemini through Google's OpenAI-compatible endpoint
+        if "gemini" in model.lower() and "/" not in model:
+            return self._create_gemini_config(model)
+
         # Determine model type based on model name/path
         if any(provider in model.lower() for provider in ["gpt", "chatgpt", "openai"]):
             model_type = "openai"
@@ -214,6 +278,36 @@ class EvaluationConfig:
         
         return base_config
     
+    def _create_gemini_config(self, model: str) -> Dict[str, Any]:
+        """Config for a Gemini model served via the OpenAI-compatible API.
+
+        The key comes from GEMINI_API_KEY (falling back to the OpenAI key
+        settings). Output is capped at max_new_tokens to match the reference
+        data, and "thinking" is turned off (2.5: reasoning_effort "none";
+        3.x: "minimal", the lowest level every 3.x model accepts) so hidden
+        reasoning neither changes behaviour relative to non-thinking runs nor
+        inflates cost. API failures raise instead of being returned as text,
+        so they are recorded as errors rather than as failing model output.
+        """
+        config = {
+            "name": self._sanitize_model_name(model),
+            "type": "openai",
+            "model_id": model,
+            "api_key": os.environ.get("GEMINI_API_KEY") or self.openai_api_key,
+            "base_url": GEMINI_OPENAI_BASE_URL,
+            "max_tokens": self.max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "system_prompt": self.system_prompt,
+            "raise_on_error": True,
+        }
+        version = re.match(r"gemini-(\d+(?:\.\d+)?)", model.lower())
+        if version and float(version.group(1)) >= 3:
+            config["request_params"] = {"reasoning_effort": "minimal"}
+        elif version and float(version.group(1)) >= 2.5:
+            config["request_params"] = {"reasoning_effort": "none"}
+        return config
+
     def _is_huggingface_model(self, model: str) -> bool:
         """Check if a model is a HuggingFace model."""
         # Common HuggingFace model patterns
@@ -405,17 +499,7 @@ class EvaluationConfig:
     def get_task_configs(self, task_type: str = "code_generation_summarization") -> List[Dict[str, Any]]:
         """Generate task configurations based on task type."""
         if task_type == "code_generation_summarization":
-            return [
-                {
-                    "type": "code_generation",
-                    "language": "python",
-                    "prompt_template": "Generate Python code for the following task: \n{description}\nReturn only the code, without explanations or comments.",
-                },
-                {
-                    "type": "code_summarization", 
-                    "prompt_template": "Use one sentence to summarize the following code and start with 'write a python function to':\n\n```\n{code}\n```\n\n```\nwrite a python function to\n```",
-                },
-            ]
+            return [dict(task) for task in LOOP_TYPES[self.loop]]
         elif task_type == "code_translation":
             # Code translation is not currently supported but kept as interface
             raise NotImplementedError("Code translation is not currently supported")

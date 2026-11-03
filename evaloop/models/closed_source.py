@@ -54,6 +54,10 @@ from .base import BaseLLM
 #             logger = logging.getLogger(__name__)
 #             logger.error(f"OpenAI API error: {str(e)}")
 #             return f"Error generating response: {str(e)}"
+class APIGenerationError(RuntimeError):
+    """An API request failed after retries (not a model output)."""
+
+
 class OpenAILLM(BaseLLM):
     """Implementation for OpenAI models like ChatGPT.
 
@@ -72,6 +76,9 @@ class OpenAILLM(BaseLLM):
         self.base_url = model_config.get("base_url")
         # None or "" sends the prompt as a single user message without a system message.
         self.system_prompt = model_config.get("system_prompt", self.DEFAULT_SYSTEM_PROMPT)
+        # Extra provider-specific parameters sent with every request
+        # (e.g. {"reasoning_effort": "none"} to disable Gemini 2.5 thinking).
+        self.request_params = dict(model_config.get("request_params") or {})
 
         # Set default to greedy decoding
         self.temperature = model_config.get("temperature", 0.0)  # 0.0 = greedy decoding
@@ -79,10 +86,25 @@ class OpenAILLM(BaseLLM):
 
         # Hardcoded retry parameters
         self.max_retries = 10  # Maximum number of retry attempts
-        self.retry_delay = 3  # Retry delay in seconds
+        self.retry_delay = 3  # Base retry delay in seconds (doubles per retry, capped)
+        self.max_retry_delay = 60
+
+        # If True, API failures raise APIGenerationError instead of being
+        # returned as the response text (which would be scored as model output).
+        self.raise_on_error = bool(model_config.get("raise_on_error", False))
 
         # Create client in init to avoid recreating for each request
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _fail(self, message: str) -> str:
+        """Return the error message as the response, or raise if raise_on_error is set."""
+        if self.raise_on_error:
+            raise APIGenerationError(message)
+        return message
+
+    def _backoff(self, retry_count: int) -> float:
+        """Exponential backoff: 3s, 6s, 12s, ... capped at max_retry_delay."""
+        return min(self.retry_delay * 2 ** max(retry_count - 1, 0), self.max_retry_delay)
 
     def _build_messages(self, prompt: str, include_system: bool) -> List[Dict[str, str]]:
         """
@@ -131,8 +153,9 @@ class OpenAILLM(BaseLLM):
         model_id = kwargs.get("model_id", self.model_id)  # Allow model ID override
         
         # Filter out parameters that are explicitly handled
-        filtered_kwargs = {k: v for k, v in kwargs.items() 
-                         if k not in ["max_tokens", "temperature", "top_p", "model_id"]}
+        filtered_kwargs = dict(self.request_params)
+        filtered_kwargs.update({k: v for k, v in kwargs.items()
+                                if k not in ["max_tokens", "temperature", "top_p", "model_id"]})
         
         # Initialize logger
         logger = logging.getLogger(__name__)
@@ -182,10 +205,10 @@ class OpenAILLM(BaseLLM):
                         logger.warning(
                             f"Received empty response, retrying ({retry_count}/{self.max_retries}) with {self.retry_delay} seconds delay."
                         )
-                        time.sleep(self.retry_delay)
+                        time.sleep(self._backoff(retry_count))
                         continue
                     else:
-                        return "Error: Still received empty response after multiple attempts."
+                        return self._fail("Error: Still received empty response after multiple attempts.")
                 
                 # If response was successfully generated, return content
                 return content
@@ -197,11 +220,11 @@ class OpenAILLM(BaseLLM):
                     logger.warning(
                         f"Rate limit error, retrying ({retry_count}/{self.max_retries}) with {self.retry_delay} seconds delay. Error: {str(e)}"
                     )
-                    time.sleep(self.retry_delay)
+                    time.sleep(self._backoff(retry_count))
                     last_error = e
                 else:
                     logger.error(f"OpenAI API rate limit error: {str(e)}")
-                    return f"Error generating response: {str(e)}"
+                    return self._fail(f"Error generating response: {str(e)}")
             
             except openai.BadRequestError as e:
                 error_msg = str(e).lower()
@@ -219,7 +242,7 @@ class OpenAILLM(BaseLLM):
                 
                 # Other bad request errors
                 logger.error(f"OpenAI API bad request error: {str(e)}")
-                return f"Error generating response: {str(e)}"
+                return self._fail(f"Error generating response: {str(e)}")
                     
             except (openai.APITimeoutError, openai.APIError) as e:
                 # Handle API timeout and general API errors
@@ -237,21 +260,21 @@ class OpenAILLM(BaseLLM):
                         logger.warning(
                             f"Model generation error, retrying ({retry_count}/{self.max_retries}) with {self.retry_delay} seconds delay. Error: {str(e)}"
                         )
-                        time.sleep(self.retry_delay)
+                        time.sleep(self._backoff(retry_count))
                         last_error = e
                     else:
                         logger.error(f"Model generation error still occurred after multiple attempts: {str(e)}")
-                        return f"Error generating response after maximum retries: {str(e)}"
+                        return self._fail(f"Error generating response after maximum retries: {str(e)}")
                 else:
                     # Non-retryable API errors
                     logger.error(f"OpenAI API error (non-retryable): {str(e)}")
-                    return f"Error generating response: {str(e)}"
+                    return self._fail(f"Error generating response: {str(e)}")
                     
             except Exception as e:
                 # Handle other unforeseen errors
                 logger.error(f"Unexpected error occurred while generating response: {str(e)}")
-                return f"Error generating response: {str(e)}"
+                return self._fail(f"Error generating response: {str(e)}")
         
         # If all retry attempts have been exhausted
         logger.error(f"All retry attempts exhausted, last error: {str(last_error)}")
-        return f"Error generating response after maximum retries: {str(last_error)}"
+        return self._fail(f"Error generating response after maximum retries: {str(last_error)}")

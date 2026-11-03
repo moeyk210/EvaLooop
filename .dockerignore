@@ -1,0 +1,11 @@
+.git
+tai4se-HW4
+results
+cache
+*.egg-info
+__pycache__
+*.pyc
+.env
+.venv
+venv
+logs

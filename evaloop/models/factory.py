@@ -4,9 +4,10 @@ import logging
 from typing import Dict, Any
 
 from .base import BaseLLM
-from .open_source import HuggingFaceLLM
-from .open_source_vllm import VllmLLM
-from .closed_source import OpenAILLM
+
+# Backends are imported lazily in create_model(): the vLLM backend raises at
+# import time when vllm is not installed (it is Linux + CUDA only), which
+# would otherwise make API-only runs impossible.
 
 
 class ModelFactory:
@@ -43,10 +44,13 @@ class ModelFactory:
         self.logger.debug(f"Creating model with config: {sanitized_config}")
         
         if model_type in ["llama", "deepseek", "huggingface", "open_source"]:
+            from .open_source import HuggingFaceLLM
             return HuggingFaceLLM(model_config)
         elif model_type in ["vllm"]:
+            from .open_source_vllm import VllmLLM
             return VllmLLM(model_config)
         elif model_type in ["openai", "chatgpt", "closed_source"]:
+            from .closed_source import OpenAILLM
             return OpenAILLM(model_config)
         else:
             raise ValueError(f"Unsupported model type: {model_type}")

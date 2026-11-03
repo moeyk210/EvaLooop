@@ -59,6 +59,7 @@ class EvaLoopCLI:
         
     Environment Setup:
         export OPENAI_API_KEY="your-api-key"  # For OpenAI models
+        export GEMINI_API_KEY="your-api-key"  # For Gemini models (e.g. gemini-2.0-flash)
         
     More information: https://github.com/evalooop/EvaLooop
     """
@@ -92,6 +93,9 @@ class EvaLoopCLI:
         preferred_batch_size: int = 64,
         is_chat_model: bool = True,
         system_prompt: str = "You are a helpful programming assistant.",
+        loop: str = "summarization",
+        num_tasks: Optional[int] = None,
+        subset_seed: int = 0,
     ) -> Dict[str, Any]:
         """
         Run code generation and summarization evaluation experiment.
@@ -128,6 +132,13 @@ class EvaLoopCLI:
             preferred_batch_size: Preferred batch size when auto-batching.
             is_chat_model: Whether the model is a chat/instruction-tuned model.
             system_prompt: System prompt for chat models.
+            loop: Loop type run in each cycle:
+                  "summarization" (default; one-sentence summaries),
+                  "summarization_detailed" (detailed summaries, as in the
+                  reference data package), or "pseudocode" (code <-> pseudocode).
+            num_tasks: Evaluate a reproducible random subset of this many tasks
+                       (default: all tasks).
+            subset_seed: Random seed used to pick the num_tasks subset.
 
         Returns:
             Dictionary containing evaluation results with successful cycles for each task.
@@ -203,7 +214,11 @@ class EvaLoopCLI:
             is_chat_model=is_chat_model,
             system_prompt=system_prompt,
             openai_api_key=openai_api_key,
+            loop=loop,
+            num_tasks=num_tasks,
+            subset_seed=subset_seed,
         )
+        self.logger.info(f"Loop type: {loop}" + (f", {num_tasks} tasks (seed {subset_seed})" if num_tasks else ""))
         # Log model type detection results
         model_config = config.get_model_config()
         model_type = model_config["type"]

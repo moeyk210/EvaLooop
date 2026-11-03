@@ -33,8 +33,13 @@ class CodeSummarizationTask(BaseTask):
         prompt layout, where the last line is the closing quotes and the
         second-to-last is an assert statement.
         """
-        try:
-            assert_code = context.get("cycle_input", "").splitlines()[-2]
-        except IndexError:
-            assert_code = ""
-        return f"\"\"\"\n{output}\n{assert_code}\n\"\"\"\n"
+        return wrap_with_assert_line(output, context)
+
+
+def wrap_with_assert_line(output: str, context: Dict[str, Any]) -> str:
+    """Wrap a loop's intermediate text as a docstring ending in the cycle's assert line."""
+    try:
+        assert_code = context.get("cycle_input", "").splitlines()[-2]
+    except IndexError:
+        assert_code = ""
+    return f"\"\"\"\n{output}\n{assert_code}\n\"\"\"\n"

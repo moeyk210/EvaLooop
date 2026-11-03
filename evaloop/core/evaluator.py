@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 from typing import Dict, Any, List
 from pathlib import Path
 
@@ -88,16 +89,30 @@ class EvaLoopEvaluator:
         self.logger.info(f"Loaded MBPP dataset with {len(py_problems)} problems")
         
         # Prepare prompts from dataset
+        task_ids = self._select_task_ids(list(py_problems))
         prompts = []
-        for task_id, problem in py_problems.items():
+        for task_id in task_ids:
             prompts.append({
                 "task_id": task_id,
-                "prompt": problem["prompt"]
+                "prompt": py_problems[task_id]["prompt"]
             })
         
         self.logger.info(f"Prepared {len(prompts)} prompts from MBPP dataset")
         return prompts, py_problems
     
+    def _select_task_ids(self, all_task_ids: List[str]) -> List[str]:
+        """Return all task ids, or a reproducible random subset of num_tasks of them.
+
+        The subset depends only on (num_tasks, subset_seed) and the dataset's
+        task ids, so every model and loop type sees the same tasks. Dataset
+        order is preserved.
+        """
+        num_tasks = self.config.num_tasks
+        if num_tasks is None or num_tasks >= len(all_task_ids):
+            return list(all_task_ids)
+        chosen = set(random.Random(self.config.subset_seed).sample(sorted(all_task_ids), num_tasks))
+        return [task_id for task_id in all_task_ids if task_id in chosen]
+
     def _create_tester(self, py_problems):
         """Create the code tester."""
         _, ground_truth = load_mbpp_dataset()  # Get ground truth
@@ -144,6 +159,11 @@ class EvaLoopEvaluator:
             "model": str(model),
             # Loop budget M; needed by the analyzer to normalize the ASL metrics
             "max_cycles": self.config.max_cycles,
+            "loop": self.config.loop,
+            "num_tasks": len(prompts),
+            "subset_seed": self.config.subset_seed if self.config.num_tasks else None,
+            "temperature": self.config.temperature,
+            "max_new_tokens": self.config.max_new_tokens,
             "prompt_results": []
         }
         
@@ -162,14 +182,30 @@ class EvaLoopEvaluator:
     def _process_cycle_results(self, cycle_output, model_result, tasks, py_problems, tester, current_cycle) -> List[Dict[str, Any]]:
         """Process cycle results and return prompts for next cycle."""
         next_cycle_prompts = []
-        
+
+        # A task step that raised (e.g. an API failure after retries) is an
+        # infrastructure error, not a model failure: flag it so the analysis
+        # can exclude or rerun the affected loops.
+        errored = [r for r in cycle_output["cycle_results"]
+                   if any(key.endswith("_error") for key in r)]
+        if errored:
+            self.logger.error(f"Cycle {current_cycle}: {len(errored)}/{len(cycle_output['cycle_results'])} "
+                              f"prompts hit a generation error (flagged as api_error)")
+            if len(errored) == len(cycle_output["cycle_results"]):
+                first = next(v for k, v in errored[0].items() if k.endswith("_error"))
+                raise RuntimeError(f"Every prompt in cycle {current_cycle} failed with a generation error; "
+                                   f"aborting run. First error: {first}")
+
         for cycle_result in cycle_output["cycle_results"]:
             task_id = cycle_result["task_id"]
             problem = py_problems.get(task_id)
-            
+
             # Find corresponding prompt result
             prompt_result = next(r for r in model_result["prompt_results"] if r["task_id"] == task_id)
-            
+            if cycle_result in errored:
+                cycle_result["api_error"] = True
+                prompt_result["api_error"] = True
+
             # Test and validate the code generation output
             success = self._test_and_validate_output(cycle_result, tasks, task_id, problem, tester)
             cycle_result["success"] = success
